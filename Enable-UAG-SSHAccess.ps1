@@ -5,28 +5,25 @@ param(
 )
 
 # --- 0. Pre-requisites ---
-# Automatically ignore invalid SSL certificates (common in labs)
+# Automatically ignore invalid SSL certificates
 Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -Scope Session | Out-Null
 
 # --- 1. vCenter Authentication ---
+# Only prompt if vCenter was NOT passed as a parameter
 if (-not $vCenter) {
     $vCenter = Read-Host "Enter vCenter hostname/IP"
 }
 
-# Check if we are already connected to this vCenter
+# Check existing connection
 $currentSession = $global:DefaultVIServer | Where-Object { $_.Name -eq $vCenter -and $_.IsConnected }
 
 if (-not $currentSession) {
     Write-Host "`n--- vCenter Login ($vCenter) ---" -ForegroundColor Yellow
     
-    # Ask for Username
     $vcUser = Read-Host "Enter Username (Press Enter for 'administrator@vsphere.local')"
     if (-not $vcUser) { $vcUser = "administrator@vsphere.local" }
 
-    # Ask for Password securely in the console
     $vcPass = Read-Host "Enter Password for $vcUser" -AsSecureString
-    
-    # Create the credential object manually
     $vcCred = New-Object System.Management.Automation.PSCredential ($vcUser, $vcPass)
 
     Write-Host "Connecting..." -ForegroundColor Cyan
@@ -42,19 +39,20 @@ if (-not $currentSession) {
 }
 
 # --- 2. Target VM Selection ---
-# FIX: Now prompts if the user forgot to pass -vmName
+# Only prompt if vmName was NOT passed as a parameter
 if (-not $vmName) {
     $vmName = Read-Host "`nEnter UAG VM Name"
 }
 
 # --- 3. UAG Guest Credentials ---
 $guestUser = "root"
+# Only prompt if guestPassword was NOT passed as a parameter
 if (-not $guestPassword) {
     Write-Host "`n--- UAG Guest Login ---" -ForegroundColor Yellow
     $securePassword = Read-Host "Enter UAG root password" -AsSecureString
-    $guestPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-    )
+    
+    # FIXED: Conversion is now on a single line to avoid parser errors
+    $guestPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword))
 }
 
 # --- 4. Get VM & Check Health ---
@@ -66,7 +64,6 @@ if (-not $uagVM) {
     exit 1
 }
 
-# Vital Check: Invoke-VMScript requires VMware Tools
 if ($uagVM.Guest.RuntimeGuestState -ne "guestRunning") {
     Write-Warning "VMware Tools is NOT running on $vmName."
     Write-Warning "Invoke-VMScript relies on VMware Tools. The commands below will likely fail."
