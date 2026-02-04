@@ -1,4 +1,4 @@
-[# 🚀 Enable SSH Access on Omnissa UAG via vCenter (PowerCLI)
+🚀 Enable SSH Access on Omnissa UAG via vCenter (PowerCLI)
 
 This PowerShell script enables **SSH access** (including root login) on an  
 **Omnissa Unified Access Gateway (UAG)** VM by executing guest OS commands  
