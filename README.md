@@ -1,47 +1,33 @@
-🚀 Enable SSH Access on Omnissa UAG via vCenter (PowerCLI)
+# VMware UAG SSH Enabler
 
-This PowerShell script enables **SSH access** (including root login) on an  
-**Omnissa Unified Access Gateway (UAG)** VM by executing guest OS commands  
-through **VMware vCenter** with **PowerCLI**.
+A robust PowerShell script to enable **SSH** and **Root Login** on VMware Unified Access Gateways (UAG) using PowerCLI `Invoke-VMScript`.
 
----
+Useful for lab environments, troubleshooting, or when the UAG console is not accessible via standard means.
 
-## 📌 Features
+## 🚀 Improvements in v2 (Latest Update)
 
-✔ Connects securely to **vCenter**  
-✔ Locates the specified **UAG VM**  
-✔ Updates `/etc/ssh/sshd_config` → `PermitRootLogin yes`  
-✔ Enables & starts the **SSH service** (`sshd` / `ssh`)  
-✔ Provides clear success & warning messages  
+The script has been refactored to be more reliable in modern terminals (VS Code, Windows Terminal) and headless environments.
 
----
+* **No UI Dependencies:** Replaced `Get-Credential` pop-ups with secure console-based input (`Read-Host`). This fixes issues where the credential window would not appear or crash the script in VS Code.
+* **Smart Authentication:** Automatically detects existing vCenter sessions to avoid repeated login prompts.
+* **Pre-flight Checks:** Verifies that **VMware Tools** is running on the target UAG before attempting execution.
+* **SSL Handling:** Automatically handles invalid/self-signed certificates (common in lab environments).
+* **Clean Output:** Removed special characters/icons to ensure compatibility with all distinct shell encodings.
 
-## ⚙️ Requirements
+## 📋 Prerequisites
 
-- **PowerShell** (Windows, Linux, or macOS)  
-- **VMware PowerCLI** module installed  
-- Network access to **vCenter**  
-- Sufficient **vCenter permissions** (VM inventory + guest operations)  
-- UAG VM must run **VMware Tools / open-vm-tools**  
-- **Root password** of the UAG  
+* **PowerCLI** installed (`Install-Module -Name VMware.PowerCLI`).
+* **Network Access:**
+    * HTTPS (443) to vCenter.
+    * The vCenter must have access to the ESXi host where the UAG resides.
+* **VMware Tools:** Must be running on the UAG appliance (required for `Invoke-VMScript`).
 
----
+## 💻 Usage
 
-## 📥 Parameters
+Download the script and run it via PowerShell. You can pass arguments or let the script prompt you interactively.
 
-| Parameter       | Description                                      | Required |
-|-----------------|--------------------------------------------------|----------|
-| `-vCenter`      | vCenter hostname or IP                           | ✅       |
-| `-vmName`       | Display name of the UAG VM in vCenter            | ✅       |
-| `-guestPassword`| Root password of the UAG guest OS (or prompt)    | ❌       |
+### Option 1: Interactive Mode
+Simply run the script. It will prompt for the vCenter IP, Credentials, and UAG Root Password securely in the console.
 
-> The script always uses **`root`** as the guest username.
-
----
-
-## ▶️ Usage
-
-### Prompt for missing values
 ```powershell
-.\Enable-UAG-SSH.ps1
-](https://github.com/vmmachina/uag-ssh/releases/tag/v2.0.0.0)
+.\Enable-UAG-SSHAccess.ps1
