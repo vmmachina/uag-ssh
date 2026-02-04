@@ -1,6 +1,6 @@
-# VMware UAG SSH Enabler
+# Omnissa UAG SSH Enabler
 
-A robust PowerShell script to enable **SSH** and **Root Login** on VMware Unified Access Gateways (UAG) using PowerCLI `Invoke-VMScript`.
+A robust PowerShell script to enable **SSH** and **Root Login** on Omnissa Unified Access Gateways (UAG) using PowerCLI `Invoke-VMScript`.
 
 Useful for lab environments, troubleshooting, or when the UAG console is not accessible via standard means.
 
@@ -16,7 +16,7 @@ The script has been refactored to be more reliable in modern terminals (VS Code,
 
 ## 📋 Prerequisites
 
-* **PowerCLI** installed (`Install-Module -Name VMware.PowerCLI`).
+* **PowerCLI** installed (`Install-Module -Name VCF.PowerCLI`).
 * **Network Access:**
     * HTTPS (443) to vCenter.
     * The vCenter must have access to the ESXi host where the UAG resides.
