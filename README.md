@@ -31,3 +31,5 @@ Simply run the script. It will prompt for the vCenter IP, Credentials, and UAG R
 
 ```powershell
 .\Enable-UAG-SSHAccess.ps1
+
+test
