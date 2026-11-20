@@ -1,98 +1,179 @@
+<#
+.SYNOPSIS
+Enables root/password SSH access on an Omnissa UAG through VMware Tools.
+.DESCRIPTION
+Version 3.0.0. Supports UAG 2609 AlmaLinux drop-ins and older main-file
+configurations. Saves changed configuration and rolls back on error.
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$vCenter,
     [string]$vmName,
-    [string]$guestPassword
+    # Retained for existing callers. Prefer GuestCredential or the secure prompt.
+    [string]$guestPassword,
+    [string]$VMId,
+    [PSCredential]$GuestCredential,
+    [PSCredential]$VCenterCredential,
+    [switch]$IgnoreInvalidCertificate
 )
 
-# --- 0. Pre-requisites ---
-# Automatically ignore invalid SSL certificates
-Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -Scope Session | Out-Null
-
-# --- 1. vCenter Authentication ---
-# Only prompt if vCenter was NOT passed as a parameter
-if (-not $vCenter) {
-    $vCenter = Read-Host "Enter vCenter hostname/IP"
+$ErrorActionPreference = 'Stop'
+Import-Module VMware.VimAutomation.Core -ErrorAction Stop
+if ($IgnoreInvalidCertificate) {
+    Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -Scope Session | Out-Null
 }
-
-# Check existing connection
-$currentSession = $global:DefaultVIServer | Where-Object { $_.Name -eq $vCenter -and $_.IsConnected }
-
-if (-not $currentSession) {
-    Write-Host "`n--- vCenter Login ($vCenter) ---" -ForegroundColor Yellow
-    
-    $vcUser = Read-Host "Enter Username (Press Enter for 'administrator@vsphere.local')"
-    if (-not $vcUser) { $vcUser = "administrator@vsphere.local" }
-
-    $vcPass = Read-Host "Enter Password for $vcUser" -AsSecureString
-    $vcCred = New-Object System.Management.Automation.PSCredential ($vcUser, $vcPass)
-
-    Write-Host "Connecting..." -ForegroundColor Cyan
-    try {
-        Connect-VIServer -Server $vCenter -Credential $vcCred -ErrorAction Stop | Out-Null
-        Write-Host "Successfully connected to vCenter." -ForegroundColor Green
-    }
-    catch {
-        Write-Error "Failed to connect to vCenter."
-        Write-Error "Details: $($_.Exception.Message)"
-        exit 1
-    }
-}
-
-# --- 2. Target VM Selection ---
-# Only prompt if vmName was NOT passed as a parameter
-if (-not $vmName) {
-    $vmName = Read-Host "`nEnter UAG VM Name"
-}
-
-# --- 3. UAG Guest Credentials ---
-$guestUser = "root"
-# Only prompt if guestPassword was NOT passed as a parameter
-if (-not $guestPassword) {
-    Write-Host "`n--- UAG Guest Login ---" -ForegroundColor Yellow
-    $securePassword = Read-Host "Enter UAG root password" -AsSecureString
-    
-    # FIXED: Conversion is now on a single line to avoid parser errors
-    $guestPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword))
-}
-
-# --- 4. Get VM & Check Health ---
-Write-Host "`nLooking for VM: $vmName..." -ForegroundColor Cyan
-$uagVM = Get-VM -Name $vmName -ErrorAction SilentlyContinue
-
-if (-not $uagVM) {
-    Write-Error "VM '$vmName' not found in vCenter $vCenter."
-    exit 1
-}
-
-if ($uagVM.Guest.RuntimeGuestState -ne "guestRunning") {
-    Write-Warning "VMware Tools is NOT running on $vmName."
-    Write-Warning "Invoke-VMScript relies on VMware Tools. The commands below will likely fail."
-}
-
-# --- 5. Execution Logic ---
-$cmds = @(
-  "sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config",
-  "systemctl enable sshd",
-  "systemctl restart sshd"
-)
-
-Write-Host "Enabling SSH access on $vmName..." -ForegroundColor Cyan
-
-foreach ($cmd in $cmds) {
-    try {
-        $result = Invoke-VMScript -VM $uagVM -ScriptText $cmd -GuestUser $guestUser -GuestPassword $guestPassword -ScriptType Bash -ErrorAction Stop
-        
-        if ($result.ExitCode -eq 0) {
-            Write-Host "  [OK] $cmd" -ForegroundColor Gray
-        } else {
-            Write-Warning "  [FAIL] $cmd (Exit Code: $($result.ExitCode))"
-            Write-Host "  Output: $($result.ScriptOutput)" -ForegroundColor Red
+if (-not $vCenter) { $vCenter = Read-Host 'Enter vCenter hostname/IP' }
+if (-not $vmName -and -not $VMId) { $vmName = Read-Host 'Enter UAG VM name (exact name)' }
+if (-not $vCenter -or (-not $vmName -and -not $VMId)) { throw 'vCenter and VM name or VMId are required.' }
+if ($vmName -and $VMId) { throw 'Specify vmName or VMId, not both.' }
+$currentSession = @(@($global:DefaultVIServers) + @($global:DefaultVIServer)) |
+    Where-Object { $_ -and $_.IsConnected -and $_.Name -eq $vCenter } |
+    Select-Object -First 1
+$openedSession = $false
+try {
+    if (-not $currentSession) {
+        if (-not $VCenterCredential) {
+            $vcUser = Read-Host 'Enter vCenter username (default: administrator@vsphere.local)'
+            if (-not $vcUser) { $vcUser = 'administrator@vsphere.local' }
+            $VCenterCredential = [PSCredential]::new($vcUser, (Read-Host 'Enter vCenter password' -AsSecureString))
         }
+        $currentSession = Connect-VIServer -Server $vCenter -Credential $VCenterCredential -ErrorAction Stop
+        $openedSession = $true
     }
-    catch {
-        Write-Error "  Failed to execute command via VMware Tools."
-        Write-Error "  Details: $($_.Exception.Message)"
+    $matches = if ($VMId) {
+        @(Get-VM -Server $currentSession -Id $VMId -ErrorAction Stop)
+    } else {
+        @(Get-VM -Server $currentSession -Name $vmName -ErrorAction Stop |
+            Where-Object { $_.Name -eq $vmName })
+    }
+    $matches = @($matches)
+    if ($matches.Count -ne 1) { throw "Expected exactly one VM on '$vCenter'; found $($matches.Count). Use VMId when VM names are duplicated." }
+    $uagVM = $matches[0]
+    $vmName = $uagVM.Name
+    if ($uagVM.PowerState -ne 'PoweredOn') { throw "VM '$vmName' must be powered on." }
+    if ($uagVM.ExtensionData.Guest.ToolsRunningStatus -ne 'guestToolsRunning') {
+        throw "VMware Tools is not running on '$vmName'. Invoke-VMScript cannot continue."
+    }
+    if (-not $PSCmdlet.ShouldProcess("$vCenter / $vmName / $($uagVM.Id)", 'Enable root/password SSH access')) { return }
+    if ($GuestCredential -and $guestPassword) { throw 'Specify GuestCredential or guestPassword, not both.' }
+    if (-not $GuestCredential) {
+        $securePassword = if ($guestPassword) {
+            ConvertTo-SecureString $guestPassword -AsPlainText -Force
+        } else {
+            Read-Host 'Enter UAG root password' -AsSecureString
+        }
+        $GuestCredential = [PSCredential]::new('root', $securePassword)
+        $guestPassword = $null
+    }
+    if ($GuestCredential.UserName -ne 'root') { throw 'The guest credential must be for root.' }
+
+    # Self-contained so the downloadable PS1 is sufficient.
+    $guestScript = @'
+set -euo pipefail
+export LC_ALL=C
+[ "$(id -u)" = 0 ] || { echo 'ERROR: root is required.' >&2; exit 1; }
+sshd_bin=$(command -v sshd || true)
+[ -n "$sshd_bin" ] || { echo 'ERROR: sshd was not found in PATH.' >&2; exit 1; }
+main_config=/etc/ssh/sshd_config
+target=$main_config
+if [ -f /etc/ssh/sshd_config.d/30-uag.conf ]; then
+    target=/etc/ssh/sshd_config.d/30-uag.conf
+fi
+[ -f "$target" ] || { echo "ERROR: SSH configuration not found: $target" >&2; exit 1; }
+service_command=$(systemctl show sshd.service -p ExecStart --value)
+if [[ "$service_command" =~ (^|[[:space:]])-f ]]; then
+    echo 'ERROR: sshd.service uses a custom -f configuration; refusing to edit the default configuration.' >&2
+    exit 1
+fi
+"$sshd_bin" -t
+was_enabled=$(systemctl is-enabled sshd.service 2>/dev/null || true)
+was_active=$(systemctl is-active sshd.service 2>/dev/null || true)
+case "$was_enabled" in
+    enabled|disabled) ;;
+    *) echo "ERROR: unsupported sshd service state: $was_enabled" >&2; exit 1 ;;
+esac
+candidate=$(mktemp)
+backup_dir=''
+changed=0
+service_touched=0
+rollback() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+        echo 'ERROR: SSH activation failed.' >&2
+        if [ "$changed" = 1 ]; then
+            if cat "$backup_dir/config.before" > "$target"; then
+                echo "Restored configuration: $target" >&2
+            else
+                echo "ERROR: restore failed; backup: $backup_dir/config.before" >&2
+            fi
+        fi
+        if [ "$service_touched" = 1 ]; then
+            if [ "$was_enabled" = disabled ]; then systemctl disable sshd.service >&2 || true; fi
+            if [ "$was_active" = active ]; then
+                systemctl reload-or-restart sshd.service >&2 || true
+            else
+                systemctl stop sshd.service >&2 || true
+            fi
+        fi
+    fi
+    rm -f "$candidate"
+    exit "$status"
+}
+trap rollback EXIT
+
+# Override global values only; retain all other settings and Match blocks.
+awk '
+    BEGIN { print "PermitRootLogin yes"; print "PasswordAuthentication yes"; in_match=0 }
+    tolower($1) == "match" { in_match=1 }
+    !in_match && (tolower($1) == "permitrootlogin" || tolower($1) == "passwordauthentication") { next }
+    { print }
+' "$target" > "$candidate"
+if ! cmp -s "$candidate" "$target"; then
+    backup_dir=/var/backups/uag-ssh/$(date -u +%Y%m%dT%H%M%SZ)-$$
+    (umask 077; mkdir -p "$backup_dir"; cp -p "$target" "$backup_dir/config.before")
+    changed=1
+    # Keep the existing inode, ownership, permissions and SELinux label.
+    cat "$candidate" > "$target"
+fi
+"$sshd_bin" -t
+effective=$("$sshd_bin" -T)
+for setting in 'permitrootlogin yes' 'passwordauthentication yes'; do
+    if ! grep -qx "$setting" <<< "$effective"; then
+        echo "ERROR: effective SSH configuration does not contain '$setting'; check earlier includes/Match rules." >&2
+        exit 1
+    fi
+done
+auth_methods=$(awk '$1 == "authenticationmethods" { $1=""; sub(/^ /, ""); print }' <<< "$effective")
+case " $auth_methods " in
+    *' any '*|*' password '*) ;;
+    *) echo "ERROR: AuthenticationMethods prevents password-only login: $auth_methods" >&2; exit 1 ;;
+esac
+service_touched=1
+systemctl enable sshd.service
+if [ "$was_active" != active ]; then
+    systemctl start sshd.service
+elif [ "$changed" = 1 ]; then
+    systemctl reload sshd.service
+fi
+systemctl is-active --quiet sshd.service
+systemctl is-enabled --quiet sshd.service
+echo "Configuration: $target"
+echo "Changed: $changed"
+if [ -n "$backup_dir" ]; then echo "Backup: $backup_dir/config.before"; fi
+grep -E '^(permitrootlogin|passwordauthentication|authenticationmethods|port|listenaddress) ' <<< "$effective"
+echo 'UAG_SSH_SUCCESS: sshd is active/enabled; global root/password settings verified.'
+'@
+
+    $result = Invoke-VMScript -VM $uagVM -Server $currentSession -ScriptText $guestScript `
+        -GuestCredential $GuestCredential -ScriptType Bash -ToolsWaitSecs 30 -ErrorAction Stop
+    if ($result.ScriptOutput) { Write-Host $result.ScriptOutput.TrimEnd() }
+    if ($result.ExitCode -ne 0 -or $result.ScriptOutput -notmatch '(?m)^UAG_SSH_SUCCESS:') {
+        throw "SSH activation failed on '$vmName' (guest exit code: $($result.ExitCode))."
+    }
+    Write-Host "SSH enabled on '$vmName'. Verify connectivity from the intended management network." -ForegroundColor Green
+} finally {
+    if ($openedSession -and $currentSession) {
+        Disconnect-VIServer -Server $currentSession -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
     }
 }
-
-Write-Host "`nScript Complete. SSH should now be enabled." -ForegroundColor Green

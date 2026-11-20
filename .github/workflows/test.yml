@@ -1,0 +1,26 @@
+name: Test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  guest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y openssh-server
+      - run: sudo mkdir -p /run/sshd
+      - run: sudo python3 -m unittest discover -s tests -v
+      - name: Parse PowerShell and embedded Bash
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          $path = (Resolve-Path ./Enable-UAG-SSHAccess.ps1).Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count) { throw ($parseErrors -join "`n") }
+          $source = Get-Content $path -Raw
+          $guest = [regex]::Match($source, "(?s)\`$guestScript = @'\n(.*?)\n'@").Groups[1].Value
+          if (-not $guest) { throw 'Embedded guest program not found' }
+          $guest | Set-Content /tmp/uag-ssh-guest.sh
+          bash -n /tmp/uag-ssh-guest.sh
+          if ($LASTEXITCODE) { throw 'Bash syntax validation failed' }
